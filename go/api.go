@@ -50,6 +50,10 @@ type APIShipmentStatusReq struct {
 	ReserveID string `json:"reserve_id"`
 }
 
+func init() {
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 4096
+}
+
 func APIPaymentToken(paymentURL string, param *APIPaymentServiceTokenReq) (*APIPaymentServiceTokenRes, error) {
 	b, _ := json.Marshal(param)
 
