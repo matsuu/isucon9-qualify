@@ -120,19 +120,22 @@ type Item struct {
 }
 
 type ItemUser struct {
-	ID           int64     `json:"id" db:"id"`
-	SellerID     int64     `json:"seller_id" db:"seller_id"`
-	BuyerID      int64     `json:"buyer_id" db:"buyer_id"`
-	Status       string    `json:"status" db:"status"`
-	Name         string    `json:"name" db:"name"`
-	Price        int       `json:"price" db:"price"`
-	Description  string    `json:"description" db:"description"`
-	ImageName    string    `json:"image_name" db:"image_name"`
-	CategoryID   int       `json:"category_id" db:"category_id"`
-	CreatedAt    time.Time `json:"-" db:"created_at"`
-	UpdatedAt    time.Time `json:"-" db:"updated_at"`
-	AccountName  string    `json:"account_name" db:"account_name"`
-	NumSellItems int       `json:"num_sell_items" db:"num_sell_items"`
+	ID                int64     `json:"id" db:"id"`
+	SellerID          int64     `json:"seller_id" db:"seller_id"`
+	BuyerID           int64     `json:"buyer_id" db:"buyer_id"`
+	Status            string    `json:"status" db:"status"`
+	Name              string    `json:"name" db:"name"`
+	Price             int       `json:"price" db:"price"`
+	Description       string    `json:"description" db:"description"`
+	ImageName         string    `json:"image_name" db:"image_name"`
+	CategoryID        int       `json:"category_id" db:"category_id"`
+	CreatedAt         time.Time `json:"-" db:"created_at"`
+	UpdatedAt         time.Time `json:"-" db:"updated_at"`
+	AccountName       string    `json:"account_name" db:"account_name"`
+	NumSellItems      int       `json:"num_sell_items" db:"num_sell_items"`
+	TransactionID     *int64    `db:"transaction_id"`
+	TransactionStatus *string   `db:"transaction_status"`
+	ShippingReserveID *string   `db:"shipping_reserve_id"`
 }
 
 type ItemSimple struct {
@@ -252,6 +255,7 @@ var categoryMap = map[int]Category{
 }
 
 var userMap sync.Map
+var lockMap sync.Map
 
 var configMap = make(map[string]string)
 
@@ -620,7 +624,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		Campaign: 2,
+		Campaign: 4,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -999,7 +1003,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	if itemID > 0 && createdAt > 0 {
 		// paging
 		err := tx.Select(&items,
-			"SELECT i.*, u.account_name, u.num_sell_items FROM `items` i JOIN users u ON i.seller_id = u.id WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) AND (i.created_at < ?  OR (i.created_at <= ? AND i.id < ?)) ORDER BY i.created_at DESC, i.id DESC LIMIT ?",
+			"SELECT i.*, u.account_name, u.num_sell_items, t.id as transaction_id, t.status AS transaction_status, s.reserve_id AS shipping_reserve_id FROM `items` i JOIN users u ON i.seller_id = u.id LEFT JOIN transaction_evidences t ON i.id = t.item_id LEFT JOIN shippings s ON t.id = s.transaction_evidence_id WHERE (i.seller_id = ? OR i.buyer_id = ?) AND i.status IN (?,?,?,?,?) AND (i.created_at < ?  OR (i.created_at <= ? AND i.id < ?)) ORDER BY i.created_at DESC, i.id DESC LIMIT ?",
 			user.ID,
 			user.ID,
 			ItemStatusOnSale,
@@ -1021,7 +1025,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		err := tx.Select(&items,
-			"SELECT i.*, u.account_name, u.num_sell_items FROM `items` i JOIN users u ON i.seller_id = u.id WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) ORDER BY i.created_at DESC, i.id DESC LIMIT ?",
+			"SELECT i.*, u.account_name, u.num_sell_items, t.id as transaction_id, t.status AS transaction_status, s.reserve_id AS shipping_reserve_id FROM `items` i JOIN users u ON i.seller_id = u.id LEFT JOIN transaction_evidences t ON i.id = t.item_id LEFT JOIN shippings s ON t.id = s.transaction_evidence_id WHERE (i.seller_id = ? OR i.buyer_id = ?) AND i.status IN (?,?,?,?,?) ORDER BY i.created_at DESC, i.id DESC LIMIT ?",
 			user.ID,
 			user.ID,
 			ItemStatusOnSale,
@@ -1096,32 +1100,9 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			itemDetail.Buyer = &buyer
 		}
 
-		transactionEvidence := TransactionEvidence{}
-		err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
-		if err != nil && err != sql.ErrNoRows {
-			// It's able to ignore ErrNoRows
-			log.Print(err)
-			outputErrorMsg(w, http.StatusInternalServerError, "db error")
-			tx.Rollback()
-			return
-		}
-
-		if transactionEvidence.ID > 0 {
-			shipping := Shipping{}
-			err = tx.Get(&shipping, "SELECT * FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
-			if err == sql.ErrNoRows {
-				outputErrorMsg(w, http.StatusNotFound, "shipping not found")
-				tx.Rollback()
-				return
-			}
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "db error")
-				tx.Rollback()
-				return
-			}
+		if i.TransactionID != nil && *i.TransactionID > 0 {
 			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
+				ReserveID: *i.ShippingReserveID,
 			})
 			if err != nil {
 				log.Print(err)
@@ -1129,11 +1110,51 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 				tx.Rollback()
 				return
 			}
-
-			itemDetail.TransactionEvidenceID = transactionEvidence.ID
-			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
+			itemDetail.TransactionEvidenceID = *i.TransactionID
+			itemDetail.TransactionEvidenceStatus = *i.TransactionStatus
 			itemDetail.ShippingStatus = ssr.Status
 		}
+
+		/*
+			transactionEvidence := TransactionEvidence{}
+			err = tx.Get(&transactionEvidence, "SELECT id, status FROM `transaction_evidences` WHERE `item_id` = ?", item.ID)
+			if err != nil && err != sql.ErrNoRows {
+				// It's able to ignore ErrNoRows
+				log.Print(err)
+				outputErrorMsg(w, http.StatusInternalServerError, "db error")
+				tx.Rollback()
+				return
+			}
+
+			if transactionEvidence.ID > 0 {
+				shipping := Shipping{}
+				err = tx.Get(&shipping, "SELECT reserve_id FROM `shippings` WHERE `transaction_evidence_id` = ?", transactionEvidence.ID)
+				if err == sql.ErrNoRows {
+					outputErrorMsg(w, http.StatusNotFound, "shipping not found")
+					tx.Rollback()
+					return
+				}
+				if err != nil {
+					log.Print(err)
+					outputErrorMsg(w, http.StatusInternalServerError, "db error")
+					tx.Rollback()
+					return
+				}
+				ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+					ReserveID: shipping.ReserveID,
+				})
+				if err != nil {
+					log.Print(err)
+					outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+					tx.Rollback()
+					return
+				}
+
+				itemDetail.TransactionEvidenceID = transactionEvidence.ID
+				itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
+				itemDetail.ShippingStatus = ssr.Status
+			}
+		*/
 
 		itemDetails = append(itemDetails, itemDetail)
 	}
@@ -1449,6 +1470,15 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 			conn.Do("DEL", key)
 		}(key)
 	*/
+	key := fmt.Sprintf("items_%d", rb.ItemID)
+	if _, loaded := lockMap.LoadOrStore(key, new(int)); loaded {
+		// log.Print(0)
+		outputErrorMsg(w, http.StatusForbidden, "item is not for sale")
+		tx.Rollback()
+		return
+	}
+	defer lockMap.Delete(key)
+
 	err = tx.Get(&targetItem, "SELECT /* postBuy */ * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
