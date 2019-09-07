@@ -9,13 +9,16 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/gomodule/redigo/redis"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	goji "goji.io"
@@ -56,13 +59,29 @@ const (
 	ItemsPerPage        = 48
 	TransactionsPerPage = 10
 
-	BcryptCost = 10
+	// BcryptCost = 10
+	BcryptCost = 4
 )
 
 var (
 	templates *template.Template
 	dbx       *sqlx.DB
 	store     sessions.Store
+)
+
+func newPool(addr string) *redis.Pool {
+	return &redis.Pool{
+		MaxIdle:     256,
+		IdleTimeout: 60 * time.Second,
+		// Dial or DialContext must be set. When both are set, DialContext takes precedence over Dial.
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", addr)
+		},
+	}
+}
+
+var (
+	pool *redis.Pool
 )
 
 type Config struct {
@@ -98,6 +117,22 @@ type Item struct {
 	CategoryID  int       `json:"category_id" db:"category_id"`
 	CreatedAt   time.Time `json:"-" db:"created_at"`
 	UpdatedAt   time.Time `json:"-" db:"updated_at"`
+}
+
+type ItemUser struct {
+	ID           int64     `json:"id" db:"id"`
+	SellerID     int64     `json:"seller_id" db:"seller_id"`
+	BuyerID      int64     `json:"buyer_id" db:"buyer_id"`
+	Status       string    `json:"status" db:"status"`
+	Name         string    `json:"name" db:"name"`
+	Price        int       `json:"price" db:"price"`
+	Description  string    `json:"description" db:"description"`
+	ImageName    string    `json:"image_name" db:"image_name"`
+	CategoryID   int       `json:"category_id" db:"category_id"`
+	CreatedAt    time.Time `json:"-" db:"created_at"`
+	UpdatedAt    time.Time `json:"-" db:"updated_at"`
+	AccountName  string    `json:"account_name" db:"account_name"`
+	NumSellItems int       `json:"num_sell_items" db:"num_sell_items"`
 }
 
 type ItemSimple struct {
@@ -169,6 +204,56 @@ type Category struct {
 	CategoryName       string `json:"category_name" db:"category_name"`
 	ParentCategoryName string `json:"parent_category_name,omitempty" db:"-"`
 }
+
+var categoryMap = map[int]Category{
+	1:  Category{ID: 1, ParentID: 0, CategoryName: "ソファー"},
+	2:  Category{ID: 2, ParentID: 1, CategoryName: "一人掛けソファー"},
+	3:  Category{ID: 3, ParentID: 1, CategoryName: "二人掛けソファー"},
+	4:  Category{ID: 4, ParentID: 1, CategoryName: "コーナーソファー"},
+	5:  Category{ID: 5, ParentID: 1, CategoryName: "二段ソファー"},
+	6:  Category{ID: 6, ParentID: 1, CategoryName: "ソファーベッド"},
+	10: Category{ID: 10, ParentID: 0, CategoryName: "家庭用チェア"},
+	11: Category{ID: 11, ParentID: 10, CategoryName: "スツール"},
+	12: Category{ID: 12, ParentID: 10, CategoryName: "クッションスツール"},
+	13: Category{ID: 13, ParentID: 10, CategoryName: "ダイニングチェア"},
+	14: Category{ID: 14, ParentID: 10, CategoryName: "リビングチェア"},
+	15: Category{ID: 15, ParentID: 10, CategoryName: "カウンターチェア"},
+	20: Category{ID: 20, ParentID: 0, CategoryName: "キッズチェア"},
+	21: Category{ID: 21, ParentID: 20, CategoryName: "学習チェア"},
+	22: Category{ID: 22, ParentID: 20, CategoryName: "ベビーソファ"},
+	23: Category{ID: 23, ParentID: 20, CategoryName: "キッズハイチェア"},
+	24: Category{ID: 24, ParentID: 20, CategoryName: "テーブルチェア"},
+	30: Category{ID: 30, ParentID: 0, CategoryName: "オフィスチェア"},
+	31: Category{ID: 31, ParentID: 30, CategoryName: "デスクチェア"},
+	32: Category{ID: 32, ParentID: 30, CategoryName: "ビジネスチェア"},
+	33: Category{ID: 33, ParentID: 30, CategoryName: "回転チェア"},
+	34: Category{ID: 34, ParentID: 30, CategoryName: "リクライニングチェア"},
+	35: Category{ID: 35, ParentID: 30, CategoryName: "投擲用椅子"},
+	40: Category{ID: 40, ParentID: 0, CategoryName: "折りたたみ椅子"},
+	41: Category{ID: 41, ParentID: 40, CategoryName: "パイプ椅子"},
+	42: Category{ID: 42, ParentID: 40, CategoryName: "木製折りたたみ椅子"},
+	43: Category{ID: 43, ParentID: 40, CategoryName: "キッチンチェア"},
+	44: Category{ID: 44, ParentID: 40, CategoryName: "アウトドアチェア"},
+	45: Category{ID: 45, ParentID: 40, CategoryName: "作業椅子"},
+	50: Category{ID: 50, ParentID: 0, CategoryName: "ベンチ"},
+	51: Category{ID: 51, ParentID: 50, CategoryName: "一人掛けベンチ"},
+	52: Category{ID: 52, ParentID: 50, CategoryName: "二人掛けベンチ"},
+	53: Category{ID: 53, ParentID: 50, CategoryName: "アウトドア用ベンチ"},
+	54: Category{ID: 54, ParentID: 50, CategoryName: "収納付きベンチ"},
+	55: Category{ID: 55, ParentID: 50, CategoryName: "背もたれ付きベンチ"},
+	56: Category{ID: 56, ParentID: 50, CategoryName: "ベンチマーク"},
+	60: Category{ID: 60, ParentID: 0, CategoryName: "座椅子"},
+	61: Category{ID: 61, ParentID: 60, CategoryName: "和風座椅子"},
+	62: Category{ID: 62, ParentID: 60, CategoryName: "高座椅子"},
+	63: Category{ID: 63, ParentID: 60, CategoryName: "ゲーミング座椅子"},
+	64: Category{ID: 64, ParentID: 60, CategoryName: "ロッキングチェア"},
+	65: Category{ID: 65, ParentID: 60, CategoryName: "座布団"},
+	66: Category{ID: 66, ParentID: 60, CategoryName: "空気椅子"},
+}
+
+var userMap sync.Map
+
+var configMap = make(map[string]string)
 
 type reqInitialize struct {
 	PaymentServiceURL  string `json:"payment_service_url"`
@@ -318,6 +403,14 @@ func main() {
 		log.Fatalf("failed to connect to DB: %s.", err.Error())
 	}
 	defer dbx.Close()
+	dbx.SetMaxIdleConns(128)
+	dbx.SetMaxOpenConns(4000)
+
+	// redis
+	pool = newPool(":6379")
+
+	// pprof
+	go http.ListenAndServe(":8080", nil)
 
 	mux := goji.NewMux()
 
@@ -396,19 +489,24 @@ func getUser(r *http.Request) (user User, errCode int, errMsg string) {
 }
 
 func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err error) {
-	user := User{}
-	err = sqlx.Get(q, &user, "SELECT * FROM `users` WHERE `id` = ?", userID)
-	if err != nil {
-		return userSimple, err
+	us, ok := userMap.Load(userID)
+	if ok {
+		userSimple = *us.(*UserSimple)
+	} else {
+		user := User{}
+		err = sqlx.Get(q, &user, "SELECT id, account_name, num_sell_items FROM `users` WHERE `id` = ?", userID)
+		if err != nil {
+			return userSimple, err
+		}
+		userSimple.ID = user.ID
+		userSimple.AccountName = user.AccountName
+		userSimple.NumSellItems = user.NumSellItems
 	}
-	userSimple.ID = user.ID
-	userSimple.AccountName = user.AccountName
-	userSimple.NumSellItems = user.NumSellItems
 	return userSimple, err
 }
 
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
-	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
+	category = categoryMap[categoryID]
 	if category.ParentID != 0 {
 		parentCategory, err := getCategoryByID(q, category.ParentID)
 		if err != nil {
@@ -416,20 +514,28 @@ func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err err
 		}
 		category.ParentCategoryName = parentCategory.CategoryName
 	}
+
 	return category, err
 }
 
 func getConfigByName(name string) (string, error) {
-	config := Config{}
-	err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
-	if err == sql.ErrNoRows {
-		return "", nil
+	if c, ok := configMap[name]; ok {
+		return c, nil
+	} else {
+		return "", fmt.Errorf("not found")
 	}
-	if err != nil {
-		log.Print(err)
-		return "", err
-	}
-	return config.Val, err
+	/*
+		config := Config{}
+		err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		if err != nil {
+			log.Print(err)
+			return "", err
+		}
+		return config.Val, err
+	*/
 }
 
 func getPaymentServiceURL() string {
@@ -490,10 +596,31 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	configMap["payment_service_url"] = ri.PaymentServiceURL
+	configMap["shipment_service_url"] = ri.ShipmentServiceURL
+
+	rows, err := dbx.Query("SELECT id, account_name, num_sell_items FROM users")
+	if err != nil {
+		panic(err)
+	}
+	for rows.Next() {
+		var u UserSimple
+		err := rows.Scan(&u.ID, &u.AccountName, &u.NumSellItems)
+		if err != nil {
+			panic(err)
+		}
+		userMap.Store(u.ID, &u)
+	}
+	rows.Close()
+
+	// redis
+	conn := pool.Get()
+	conn.Do("FLUSHALL")
+	conn.Close()
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		Campaign: 0,
+		Campaign: 2,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -868,11 +995,11 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tx := dbx.MustBegin()
-	items := []Item{}
+	items := []ItemUser{}
 	if itemID > 0 && createdAt > 0 {
 		// paging
 		err := tx.Select(&items,
-			"SELECT * FROM `items` WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) AND (`created_at` < ?  OR (`created_at` <= ? AND `id` < ?)) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			"SELECT i.*, u.account_name, u.num_sell_items FROM `items` i JOIN users u ON i.seller_id = u.id WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) AND (i.created_at < ?  OR (i.created_at <= ? AND i.id < ?)) ORDER BY i.created_at DESC, i.id DESC LIMIT ?",
 			user.ID,
 			user.ID,
 			ItemStatusOnSale,
@@ -894,7 +1021,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		err := tx.Select(&items,
-			"SELECT * FROM `items` WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			"SELECT i.*, u.account_name, u.num_sell_items FROM `items` i JOIN users u ON i.seller_id = u.id WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) ORDER BY i.created_at DESC, i.id DESC LIMIT ?",
 			user.ID,
 			user.ID,
 			ItemStatusOnSale,
@@ -913,13 +1040,25 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	itemDetails := []ItemDetail{}
-	for _, item := range items {
-		seller, err := getUserSimpleByID(tx, item.SellerID)
-		if err != nil {
-			outputErrorMsg(w, http.StatusNotFound, "seller not found")
-			tx.Rollback()
-			return
-		}
+	for _, i := range items {
+		var item Item
+		item.ID = i.ID
+		item.SellerID = i.SellerID
+		item.BuyerID = i.BuyerID
+		item.Status = i.Status
+		item.Name = i.Name
+		item.Price = i.Price
+		item.Description = i.Description
+		item.ImageName = i.ImageName
+		item.CategoryID = i.CategoryID
+		item.CreatedAt = i.CreatedAt
+		item.UpdatedAt = i.UpdatedAt
+
+		var seller UserSimple
+		seller.ID = item.SellerID
+		seller.AccountName = i.AccountName
+		seller.NumSellItems = i.NumSellItems
+
 		category, err := getCategoryByID(tx, item.CategoryID)
 		if err != nil {
 			outputErrorMsg(w, http.StatusNotFound, "category not found")
@@ -1162,7 +1301,7 @@ func postItemEdit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tx := dbx.MustBegin()
-	err = tx.Get(&targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
+	err = tx.Get(&targetItem, "SELECT /* postItemEdit */ * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
 	if err != nil {
 		log.Print(err)
 
@@ -1287,18 +1426,40 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tx := dbx.MustBegin()
+	tx.Exec("SET innodb_lock_wait_timeout = 1")
 
 	targetItem := Item{}
-	err = tx.Get(&targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
+
+	/*
+		conn := pool.Get()
+		defer conn.Close()
+		key := fmt.Sprintf("items_%d", rb.ItemID)
+		redisResult, err := conn.Do("SETNX", key, 1)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		log.Print(key, " ", redisResult)
+		if redisResult == "0" {
+			outputErrorMsg(w, http.StatusForbidden, "item is not for sale")
+			tx.Rollback()
+			return
+		}
+		defer func(key string) {
+			conn.Do("DEL", key)
+		}(key)
+	*/
+	err = tx.Get(&targetItem, "SELECT /* postBuy */ * FROM `items` WHERE `id` = ? FOR UPDATE", rb.ItemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
 		tx.Rollback()
 		return
 	}
 	if err != nil {
-		log.Print(err)
+		log.Print(1, err)
 
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		// outputErrorMsg(w, http.StatusInternalServerError, "db error")
+		outputErrorMsg(w, http.StatusForbidden, "item is not for sale")
 		tx.Rollback()
 		return
 	}
@@ -1323,7 +1484,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Print(err)
+		log.Print(2, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
@@ -1332,7 +1493,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 
 	category, err := getCategoryByID(tx, targetItem.CategoryID)
 	if err != nil {
-		log.Print(err)
+		log.Print(3, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "category id error")
 		tx.Rollback()
@@ -1351,7 +1512,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		category.ParentID,
 	)
 	if err != nil {
-		log.Print(err)
+		log.Print(4, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
@@ -1360,7 +1521,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 
 	transactionEvidenceID, err := result.LastInsertId()
 	if err != nil {
-		log.Print(err)
+		log.Print(5, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
@@ -1374,7 +1535,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		targetItem.ID,
 	)
 	if err != nil {
-		log.Print(err)
+		log.Print(6, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
@@ -1388,7 +1549,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		FromName:    seller.AccountName,
 	})
 	if err != nil {
-		log.Print(err)
+		log.Print(7, err)
 		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
 		tx.Rollback()
 
@@ -1402,7 +1563,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		Price:  targetItem.Price,
 	})
 	if err != nil {
-		log.Print(err)
+		log.Print(8, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
 		tx.Rollback()
@@ -1441,7 +1602,7 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		"",
 	)
 	if err != nil {
-		log.Print(err)
+		log.Print(9, err)
 
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		tx.Rollback()
@@ -1499,7 +1660,7 @@ func postShip(w http.ResponseWriter, r *http.Request) {
 	tx := dbx.MustBegin()
 
 	item := Item{}
-	err = tx.Get(&item, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
+	err = tx.Get(&item, "SELECT /* postShip */ * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
 		tx.Rollback()
@@ -1630,7 +1791,7 @@ func postShipDone(w http.ResponseWriter, r *http.Request) {
 	tx := dbx.MustBegin()
 
 	item := Item{}
-	err = tx.Get(&item, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
+	err = tx.Get(&item, "SELECT /* postShipDone */ * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "items not found")
 		tx.Rollback()
@@ -1775,7 +1936,7 @@ func postComplete(w http.ResponseWriter, r *http.Request) {
 
 	tx := dbx.MustBegin()
 	item := Item{}
-	err = tx.Get(&item, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
+	err = tx.Get(&item, "SELECT /* postShipDone */ * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "items not found")
 		tx.Rollback()
@@ -2019,6 +2180,10 @@ func postSell(w http.ResponseWriter, r *http.Request) {
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	us, _ := userMap.Load(seller.ID)
+	userSimple := us.(*UserSimple)
+	userSimple.NumSellItems++
+
 	tx.Commit()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
@@ -2058,7 +2223,7 @@ func postBump(w http.ResponseWriter, r *http.Request) {
 	tx := dbx.MustBegin()
 
 	targetItem := Item{}
-	err = tx.Get(&targetItem, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
+	err = tx.Get(&targetItem, "SELECT /* postBump */ * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(w, http.StatusNotFound, "item not found")
 		tx.Rollback()
@@ -2269,6 +2434,13 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 		outputErrorMsg(w, http.StatusInternalServerError, "db error")
 		return
 	}
+
+	userSimple := UserSimple{
+		ID:           userID,
+		AccountName:  accountName,
+		NumSellItems: 0,
+	}
+	userMap.Store(userID, &userSimple)
 
 	u := User{
 		ID:          userID,
