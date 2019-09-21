@@ -18,7 +18,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/gomodule/redigo/redis"
+	// "github.com/gomodule/redigo/redis"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
 	goji "goji.io"
@@ -69,6 +69,7 @@ var (
 	store     sessions.Store
 )
 
+/*
 func newPool(addr string) *redis.Pool {
 	return &redis.Pool{
 		MaxIdle:     256,
@@ -79,10 +80,10 @@ func newPool(addr string) *redis.Pool {
 		},
 	}
 }
-
 var (
 	pool *redis.Pool
 )
+*/
 
 type Config struct {
 	Name string `json:"name" db:"name"`
@@ -368,10 +369,13 @@ func init() {
 }
 
 func main() {
-	host := os.Getenv("MYSQL_HOST")
-	if host == "" {
-		host = "127.0.0.1"
-	}
+	/*
+		host := os.Getenv("MYSQL_HOST")
+		if host == "" {
+			host = "127.0.0.1"
+		}
+	*/
+	host := "db"
 	port := os.Getenv("MYSQL_PORT")
 	if port == "" {
 		port = "3306"
@@ -411,7 +415,7 @@ func main() {
 	dbx.SetMaxOpenConns(4000)
 
 	// redis
-	pool = newPool(":6379")
+	// pool = newPool(":6379")
 
 	// pprof
 	go http.ListenAndServe(":8080", nil)
@@ -526,9 +530,6 @@ func getConfigByName(name string) (string, error) {
 	if c, ok := configMap[name]; ok {
 		return c, nil
 	} else {
-		return "", fmt.Errorf("not found")
-	}
-	/*
 		config := Config{}
 		err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
 		if err == sql.ErrNoRows {
@@ -539,7 +540,7 @@ func getConfigByName(name string) (string, error) {
 			return "", err
 		}
 		return config.Val, err
-	*/
+	}
 }
 
 func getPaymentServiceURL() string {
@@ -603,6 +604,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	configMap["payment_service_url"] = ri.PaymentServiceURL
 	configMap["shipment_service_url"] = ri.ShipmentServiceURL
 
+	userMap = sync.Map{}
 	rows, err := dbx.Query("SELECT id, account_name, num_sell_items FROM users")
 	if err != nil {
 		panic(err)
@@ -618,9 +620,12 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	// redis
-	conn := pool.Get()
-	conn.Do("FLUSHALL")
-	conn.Close()
+	// conn := pool.Get()
+	// conn.Do("FLUSHALL")
+	// conn.Close()
+
+	statusMap = sync.Map{}
+	lockMap = sync.Map{}
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
